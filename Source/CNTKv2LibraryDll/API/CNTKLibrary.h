@@ -2447,6 +2447,12 @@ namespace CNTK
                                          const DeviceDescriptor& computeDevice = DeviceDescriptor::UseDefaultDevice(),
                                          const std::unordered_set<Variable>& outputsToRetainBackwardStateFor = {}) = 0;
 
+        ///
+        /// Infers the shape, data type and dynamic axes of the outputs of 'this' function based on the 
+        /// Function's inputs, and returns Output Variable objects containing the inferred information
+        ///
+        CNTK_API virtual std::vector<Variable> InferOutputs() = 0;
+
     public:
 
         // Optional overrides
@@ -2461,8 +2467,8 @@ namespace CNTK
         /// It is same as Forward, but without storing and returning information needed for backpropagation.
         ///
         CNTK_API void Evaluate(const std::unordered_map<Variable, ValuePtr>& arguments,
-                      std::unordered_map<Variable, ValuePtr>& outputs,
-                      const DeviceDescriptor& computeDevice = DeviceDescriptor::UseDefaultDevice());
+                               std::unordered_map<Variable, ValuePtr>& outputs,
+                               const DeviceDescriptor& computeDevice = DeviceDescriptor::UseDefaultDevice());
 
         ///
         /// Clones 'this' Function. The parameters of the Function are either cloned, shared or frozen as specified by the parameterCloneMethod argument and
@@ -2560,16 +2566,20 @@ namespace CNTK
         ///
         Variable Output() const
         {
-            if (m_outputs.size() > 1)
+            const auto& outputs = Outputs();
+            if (outputs.size() > 1)
                 RuntimeError("A Function instance with more than one output cannot be implicitly converted to a Variable");
 
-            return m_outputs[0];
+            return outputs[0];
         }
 
         ///
         /// Returns a vector consisting of all Output variables of 'this' Function.
         ///
-        const std::vector<Variable>& Outputs() const { return m_outputs; }
+        const std::vector<Variable>& Outputs() const
+        {
+            return const_cast<Function*>(this)->InitOutputs(); 
+        }
 
         ///
         /// Returns a set comprising of all input variables of 'this' Function's variables that are not of kind 'Parameter' or 'Constant'.
@@ -2651,7 +2661,7 @@ namespace CNTK
         ///
         /// Protected constructor for derived 'Function' types to specify the actual input and output variables for the (primitive) Function instance.
         ///
-        CNTK_API Function(const std::vector<Variable>& inputs, const std::vector<Variable>& outputs, Dictionary&& functionConfig, const std::wstring& name = L"", const std::wstring& uid = Internal::GenerateUid(L"UserDefinedFunction"));
+        CNTK_API Function(const std::vector<Variable>& inputs, Dictionary&& functionConfig, const std::wstring& name = L"", const std::wstring& uid = Internal::GenerateUid(L"UserDefinedFunction"));
 
         /// Restores the state of the 'this' Function in place using the provided dictionary.
         /// Structurally, 'this' Function graph has to be identical to the state captured in the dictionary.
@@ -2667,6 +2677,9 @@ namespace CNTK
         static bool ValidateOrUpdateOutput(const Variable& output, const Variable& newOutput, bool alwaysUpdate);
 
     private:
+
+        // Lazily initialize the Function's outputs on first invocation
+        CNTK_API std::vector<Variable>& InitOutputs();
 
         CNTK_API std::shared_ptr<std::vector<std::pair<Variable, Variable>>> BlockArgumentsMappingImpl() const;
 
@@ -2711,12 +2724,14 @@ namespace CNTK
         Function(const Function&) = delete; Function(Function&&) = delete; Function& operator=(const Function&) = delete; Function& operator=(Function&&) = delete;
 
     public:
-        CNTK_API Function(const std::vector<Variable>& inputs, const std::vector<Variable>& outputs, const std::wstring& name = L"", const std::wstring& uid = Internal::GenerateUid(L"UserDefinedFunction"));
+        CNTK_API Function(const std::vector<Variable>& inputs, const std::wstring& name = L"", const std::wstring& uid = Internal::GenerateUid(L"UserDefinedFunction"));
 
     private:
-        CNTK_API Function(const std::vector<Variable>& inputs, const std::vector<Variable>& outputs, Dictionary&& functionConfig, const FunctionPtr& rootFunction, const std::wstring& name, const std::wstring& uid);
+        CNTK_API Function(const std::vector<Variable>& inputs, Dictionary&& functionConfig, const FunctionPtr& rootFunction, const std::wstring& name, const std::wstring& uid);
 
         std::vector<Variable> m_inputs;
+
+        std::once_flag m_outputsInitFlag;
         std::vector<Variable> m_outputs;
 
         FunctionPtr m_rootFunction; // nullptr for primitive Function instances
@@ -3227,6 +3242,13 @@ namespace CNTK
     ///
     CNTK_API FunctionPtr AsBlock(FunctionPtr&& composite, const std::vector<std::pair<Variable, Variable>>& argumentsMap, const std::wstring& blockOpName, const std::wstring& blockName = L"");
 
+    ///
+    /// Creates a composite Function that has the specified rootFunction as its root.
+    /// The composite denotes a higher-level Function encapsulating the entire graph
+    /// of Functions underlying the specified rootFunction.
+    ///
+    CNTK_API FunctionPtr AsComposite(const FunctionPtr& rootFunction, const std::wstring& name = L"");
+
     namespace Sequence
     {
         CNTK_API FunctionPtr IsFirst(const Variable& operand, const std::wstring& name = L"");
@@ -3445,6 +3467,16 @@ namespace CNTK
         bool gradientClippingWithTruncation = true;
     };
 
+    ///  
+    /// Returns true if by default momentum is applied in the unit-gain fashion.
+    ///
+    CNTK_API bool DefaultUnitGainValue();
+
+    ///  
+    /// Sets globally default unit-gain flag value.
+    ///
+    CNTK_API void SetDefaultUnitGainValue(bool value);
+
     ///
     /// Abstraction for learning a subset of parameters of a learnable Function using first order gradient values
     /// For e.g momentum, AdaGrad, RMSProp etc. are different types of learners with their own algorithms for
@@ -3555,7 +3587,7 @@ namespace CNTK
     CNTK_API LearnerPtr MomentumSGDLearner(const std::vector<Parameter>& parameters,
                                            const LearningRateSchedule& learningRateSchedule,
                                            const MomentumSchedule& momentumSchedule,
-                                           bool unitGain,
+                                           bool unitGain = DefaultUnitGainValue(),
                                            AdditionalLearningOptions additionalOptions = AdditionalLearningOptions());
 
     ///
@@ -3564,7 +3596,7 @@ namespace CNTK
     CNTK_API LearnerPtr NesterovLearner(const std::vector<Parameter>& parameters,
                                         const LearningRateSchedule& learningRateSchedule,
                                         const MomentumSchedule& momentumSchedule,
-                                        bool unitGain,
+                                        bool unitGain = DefaultUnitGainValue(),
                                         AdditionalLearningOptions additionalOptions = AdditionalLearningOptions());
 
     static MomentumSchedule DefaultVarianceMomentum = MomentumAsTimeConstantSchedule(2 * 3600 * 100);
@@ -3575,7 +3607,7 @@ namespace CNTK
     CNTK_API LearnerPtr AdamLearner(const std::vector<Parameter>& parameters,
                                     const LearningRateSchedule& learningRateSchedule,
                                     const MomentumSchedule& momentumSchedule,
-                                    bool unitGain,
+                                    bool unitGain = DefaultUnitGainValue(),
                                     const MomentumSchedule& varianceMomentumSchedule = DefaultVarianceMomentum,
                                     bool lowMemory = true,
                                     AdditionalLearningOptions additionalOptions = AdditionalLearningOptions());
